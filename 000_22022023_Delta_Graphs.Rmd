@@ -1,0 +1,126 @@
+---
+title: "Delta Graphs"
+author: "Pouya Nazari"
+date: "11/18/2022"
+output: 
+  html_document:
+    number_sections: true
+    toc: true
+    toc_depth: 3
+    theme: united
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, results='hide', message=FALSE,progress=FALSE, verbose=FALSE)
+```
+
+# Loading libraries and data Frames
+
+```{r, load libraries and defining WD, echo=FALSE}
+library(tidyverse)
+library(RColorBrewer)
+library(dplyr)
+
+wd <- file.path(getwd())
+```
+
+```{r Loading experimental designs,echo=FALSE}
+#Here experimental design for scenes is read, make sure it's in 'Data' folder and the spelling is right in the line below:
+df_exp_design_scenes <- read.csv2(file.path(wd, 'Data', '20092023_FINAL_ND_ONLY_Clinical information.csv'), stringsAsFactors = FALSE) %>% 
+  mutate(scene_id = paste0('scene', sprintf('%02d',as.numeric(scene_number)))) %>% rename(slide_id = slide_name) %>% mutate(rank = unique_identifier) %>% separate(rank, c('G', 'number'),sep='SURV') %>% select(-G) %>% mutate(number = as.numeric(number)) %>% rename(pre_operative_steroids = pre.operative_steroids)%>% mutate(survival_group= factor(survival_group,levels=c("STS","MTS","LTS"))) %>% 
+  mutate(unique_identifier = paste0('SURV', sprintf('%03d',as.numeric(number))))
+```
+
+
+```{r, reading final data frames}
+# Cytometry Plots Containing diff
+df_data_810 <- read.csv2(file.path(wd, "Data","df_data_all_8-10_BV_AF_2renamed_TCYremoved_final.csv"),stringsAsFactors = FALSE)
+df_data_paired <- read.csv2(file.path(wd, "Data","df_data_annotated_BV_AF_TCY_PairedGBM_renamed.csv"), stringsAsFactors= FALSE)
+
+df_data_paired <- df_data_paired %>% select(-X,-Y) %>% rename(X=x, Y=y)
+
+common <- intersect(colnames(df_data_paired), colnames(df_data_810))
+df_data <- df_data_810 %>% select(common) %>% rbind(df_data_paired %>% select(common))
+
+df_data_final <- df_data %>% left_join(df_exp_design_scenes %>% select(slide_id, scene_id, QC_include)) %>% filter(QC_include=='1')
+
+write.csv2(df_data_final %>% select(-QC_include), file.path(wd, "Data","df_data_annotated_BV_AF_TCY_ND_cleaned.csv"),row.names = FALSE)
+#df_data <- read.csv2(file.path(wd, "Data", "df_data_annotated_BV_AF_TCY_Combined_renamed.csv"),stringsAsFactors = FALSE)
+```
+
+
+```{r, 2calculating metrics to check the intensity of different celltypes within a given tumoral and non tumoral area, fig.width=14,echo=FALSE,eval=FALSE}
+round_k<- function(x,k){
+  x <- k*floor((x-1)/k)+k
+  return(x)
+}
+
+
+df_data <- df_data_final
+
+tmp_data <- df_data #%>% select(-region)
+#First we make the squares of 70*70 pixels and rename X,Y to x,y so that we keep the cell ids.
+tmp_data <- df_data %>% mutate(x= X, y =Y) %>% 
+      mutate(X = round_k(X, 70), Y = round_k(Y, 70))
+
+
+#Here we count the tumor cells within each square:
+tmp_plot2 <- tmp_data %>% 
+       group_by(slide_id, scene_id, X, Y) %>%
+       summarise(N = sum(predicted.celltype == "TUM"), M = n()) %>%
+       ungroup() %>%
+       mutate(P = 100*N/M)
+
+#Here we divide the cores into four regions based on the cell counts:
+tmp_plot2 <- tmp_plot2 %>% mutate(region = ifelse(N > 12, 'high_density', ifelse(N > 8, 'medium density', ifelse(N >= 1, 'low density', 'non-tumor'))))
+ggplot(tmp_plot2 %>% filter(slide_id== 'MVM001',scene_id=='scene41'), aes(X, Y, fill = region)) + geom_tile() + theme_bw() + 
+    scale_fill_manual(values = c('high_density'='red', 'non-tumor'='blue', 'medium density'='orange', 'low density'='yellow'))+coord_flip()+
+     scale_x_reverse() + geom_text(aes(label = N))
+
+#leave the high and medium density tumoral regions out into 4 groups as explained:
+tmp_data <- tmp_data %>% left_join(tmp_plot2 %>% select(slide_id, scene_id, X,Y,region)) %>% rename(tumor_region = region)
+
+tmp_blank <- tmp_data %>% filter(tumor_region%in%c('low density', 'non-tumor'))
+
+#Here we count the blank cells within each square:
+tmp_plot_blank <- tmp_data %>% filter(tumor_region%in%c('low density', 'non-tumor')) %>% 
+       group_by(slide_id, scene_id, X, Y) %>%
+       summarise(N = sum(predicted.celltype == "NOS"), M = n()) %>%
+       ungroup() %>%
+       mutate(P = 100*N/M)
+
+
+#Here we divide the square into 4 groups as explained:
+tmp_plot_blank <- tmp_plot_blank %>% mutate(region = ifelse(N > 9, 'high_density', ifelse(N > 5, 'medium density', ifelse(N > 1, 'low density', 'non-blank'))))
+ggplot(tmp_plot_blank %>% filter(slide_id== 'MVM001',scene_id=='scene41'), aes(X, Y, fill = region)) + geom_tile() + theme_bw() + 
+    scale_fill_manual(values = c('high_density'='red', 'non-blank'='blue', 'medium density'='orange', 'low density'='yellow'))+coord_flip()+
+     scale_x_reverse() + geom_text(aes(label = N))
+
+tmp_data <- tmp_data %>% left_join(tmp_plot_blank %>% rename(blank_region = region) %>% select(slide_id, scene_id, X, Y,blank_region)) 
+tmp_data <- tmp_data  %>% mutate(region = tumor_region) %>%  mutate(region = ifelse(blank_region %in% 'high_density', 'Necrotic', ifelse(region%in%c('high_density','medium density'),'High_tumor',region)))%>% mutate(region = ifelse(region%in%"High_tumor","High Tumoral Density", ifelse(region%in%"low density", "Low Tumoral Density", ifelse(region%in%"non-tumor", "Non-Tumoral","Necrotic Area"))))
+
+#write.csv2(tmp_data,file.path(wd, 'Data', 'df_data_segmented_regions.csv'),row.names = FALSE)
+
+ggplot(tmp_data %>% filter(slide_id== 'MVM001',scene_id=='scene41'), aes(X, Y, fill = region)) + geom_tile() + theme_bw() + 
+    scale_fill_manual(values = c('High Tumoral Density'='red', 'Low Tumoral Density'='yellow','Non-Tumoral'='blue', 'Necrotic Area'='orange'))+coord_flip()+
+     scale_x_reverse() #+ geom_text(aes(label = N))
+
+
+
+df_data2 <- tmp_data %>% select(colnames(df_data), region, x,y)
+
+write.csv2(df_data2 %>% select(-QC_include), file.path(wd, "Data", "df_data_annotated_BV_AF_TCY_ND_cleaned.csv"), row.names = FALSE)
+
+a <- df_data2 %>% left_join(df_exp_design_scenes %>% select(slide_id, scene_id, unique_identifier))
+table(a$unique_identifier)
+```
+
+
+```{r, neftel regions}
+
+neftel<- read.csv2(file.path(wd, "Data", "neftel_square_annotated.csv"),stringsAsFactors = FALSE)%>% unique()
+tmp_data2 <- df_data %>%  left_join(neftel %>% select(-kmeans) %>% rename(neftel = Annotations)) 
+
+write.csv2(tmp_data2, file.path(wd, "Data", "df_data_annotated_BV_AF_TCY_ND_cleaned.csv"), row.names = FALSE)
+
+```
